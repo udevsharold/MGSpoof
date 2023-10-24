@@ -1,7 +1,7 @@
 Package: com.tonyk7.mgspoof
 Name: MGSpoof
-Depends: mobilesubstrate
-Version: 0.0.4
+Depends: mobilesubstrate, ws.hbang.common
+Version: 0.0.4-2
 Architecture: iphoneos-arm
 Description: Tool that can be used to spoof MGCopyAnswer's result. (iOS 9 - 13)
 Maintainer: Tony

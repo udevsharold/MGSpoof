@@ -1,83 +1,161 @@
 #import <substrate.h>
 #import <stdint.h>
+#import <sys/utsname.h>
+#import <sys/sysctl.h>
 
-extern "C" CFPropertyListRef MGCopyAnswer(CFStringRef);
+#import <Foundation/Foundation.h>
+#import "capstone/capstone.h"
+#import <Cephei/Cephei.h>
+#import "mapping.h"
+#import <HBLog.h>
+
 static NSDictionary *modifiedKeys;
 static NSArray *appsChosen;
+static NSDictionary *keyTable;
 
-/* step64 and follow_cal functions are taken from: https://github.com/xerub/macho/blob/master/patchfinder64.c */
-typedef unsigned long long addr_t;
-
-static addr_t step64(const uint8_t *buf, addr_t start, size_t length, uint32_t what, uint32_t mask) {
-	addr_t end = start + length;
-	while (start < end) {
-		uint32_t x = *(uint32_t *)(buf + start);
-		if ((x & mask) == what) {
-			return start;
-		}
-		start += 4;
-	}
-	return 0;
+static CFTypeRef (*orig_MGCopyAnswer)(CFStringRef property, uint32_t *outTypeCode);
+CFTypeRef new_MGCopyAnswer(CFStringRef property, uint32_t *outTypeCode){
+    NSString *deobfuscatedKey = deobfuscate_key((__bridge NSString *)property, keyTable);
+    if (deobfuscatedKey && modifiedKeys[deobfuscatedKey]) {
+        HBLogDebug(@"deobfuscatedKey: %@, property: %@, ret: %@", deobfuscatedKey, property, modifiedKeys[deobfuscatedKey]);
+        return (__bridge_retained CFStringRef)modifiedKeys[deobfuscatedKey];
+    }
+    CFTypeRef ret = orig_MGCopyAnswer(property, outTypeCode);
+    HBLogDebug(@"property: %@, ret: %@", property, ret);
+    return ret;
 }
 
-// Modified version of find_call64(), replaced what/mask arguments in the function to the ones for branch instruction (0x14000000, 0xFC000000)
-static addr_t find_branch64(const uint8_t *buf, addr_t start, size_t length) {
-	return step64(buf, start, length, 0x14000000, 0xFC000000);
+int uname(struct utsname *);
+%hookf(int, uname, struct utsname *value) {
+    int ret = %orig;
+    
+    if (value){
+        if (modifiedKeys[@"ProductType"]) {
+            NSString *productType = modifiedKeys[@"ProductType"];
+            const char *machine = productType.UTF8String;
+            strcpy(value->machine, machine);
+        }
+        
+        if (modifiedKeys[@"UserAssignedDeviceName"] || modifiedKeys[@"ComputerName"]) {
+            NSString *computerName = modifiedKeys[@"ComputerName"] ?: modifiedKeys[@"UserAssignedDeviceName"];
+            const char *nname = computerName.UTF8String;
+            strcpy(value->nodename, nname);
+        }
+    }
+    
+    HBLogDebug(@"utsmachine: %s, utsrelease: %s, utssystem: %s, utsnodename: %s", value->machine, value->release, value->version, value->nodename);
+    
+    return ret;
 }
 
-static addr_t follow_branch64(const uint8_t *buf, addr_t branch) {
-	long long w;
-	w = *(uint32_t *)(buf + branch) & 0x3FFFFFF;
-	w <<= 64 - 26;
-	w >>= 64 - 26 - 2;
-	return branch + w;
+int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+%hookf(int, sysctlbyname, const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    int ret = %orig;
+    
+    if(strcmp(name, "hw.machine") == 0 && oldp){
+        if (modifiedKeys[@"ProductType"]) {
+            const char *machine = ((NSString *)modifiedKeys[@"ProductType"]).UTF8String;
+            strcpy((char *)oldp, machine);
+        }
+    } else if(strcmp(name, "kern.osproductversion") == 0 && oldp){
+        if (modifiedKeys[@"ProductVersion"]) {
+            const char *version = ((NSString *)modifiedKeys[@"ProductVersion"]).UTF8String;
+            strcpy((char *)oldp, version);
+        }
+    } else if(strcmp(name, "kern.osversion") == 0 && oldp){
+        if (modifiedKeys[@"BuildVersion"]) {
+            const char *buildversion = ((NSString *)modifiedKeys[@"BuildVersion"]).UTF8String;
+            strcpy((char *)oldp, buildversion);
+        }
+    }
+    
+    return ret;
 }
 
-// Our replaced version of MGCopyAnswer_internal
-static CFPropertyListRef (*orig_MGCopyAnswer_internal)(CFStringRef property, uint32_t *outTypeCode);
-CFPropertyListRef new_MGCopyAnswer_internal(CFStringRef property, uint32_t *outTypeCode) {
-	if (modifiedKeys[(__bridge NSString *)property]) {
-		return (__bridge_retained CFStringRef)modifiedKeys[(__bridge NSString *)property];
-	}
-	return orig_MGCopyAnswer_internal(property, outTypeCode);
+int sysctl(int *, u_int , void *, size_t *, void *, size_t);
+%hookf(int, sysctl, int *name, u_int namelen, void *oldp, size_t *oldlenp, const void *newp, size_t newlen) {
+    int ret = %orig;
+    
+    if (namelen == 2 && name[0] == CTL_HW && name[1] == HW_MACHINE && oldp) {
+        NSString *productTypeK = keyTable[@"ProductType"] ?: @"ProductType";
+        if (modifiedKeys[productTypeK]) {
+            const char *machine = ((NSString *)modifiedKeys[productTypeK]).UTF8String;
+            strncpy((char*)oldp, machine, strlen(machine));
+        }
+    }
+    return ret;
 }
-
 
 static void appsChosenUpdated() {
-	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:@"com.tonyk7.MGSpoofHelperPrefsSuite"];
-	appsChosen = [prefs objectForKey:@"spoofApps"];
+    appsChosen = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"spoofApps"];
 }
 
 static void modifiedKeyUpdated() {
-	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:@"com.tonyk7.MGSpoofHelperPrefsSuite"];
-	modifiedKeys = [prefs objectForKey:@"modifiedKeys"];
+    modifiedKeys = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"modifiedKeys"];
 }
 
-%ctor {
-	@autoreleasepool {
-		appsChosenUpdated();
-		// don't do anything if we in an app we don't want to spoof anything
-		if (![appsChosen containsObject:[NSBundle mainBundle].bundleIdentifier])
-			return;
+static void initkeyTable() {
+    keyTable = key_mapping_table();
+}
 
-		// basically dlopen libMobileGestalt
-		MSImageRef libGestalt = MSGetImageByName("/usr/lib/libMobileGestalt.dylib");
-		if (libGestalt) {
-			// Get "_MGCopyAnswer" symbol
-			void *MGCopyAnswerFn = MSFindSymbol(libGestalt, "_MGCopyAnswer");
-			/*
-			 * get address of MGCopyAnswer_internal by doing symbol + offset (should be 8 bytes)
-			 * note: hex implementation of MGCopyAnswer: 01 00 80 d2 01 00 00 14 (from iOS 9+)
-			 * so address of MGCopyAnswer + offset = MGCopyAnswer_internal. MGCopyAnswer_internal *always follows MGCopyAnswer (*from what I've checked)
-			 */
-			const uint8_t *MGCopyAnswer_ptr = (const uint8_t *)MGCopyAnswer;
-			addr_t branch = find_branch64(MGCopyAnswer_ptr, 0, 8);
-			addr_t branch_offset = follow_branch64(MGCopyAnswer_ptr, branch);
-			MSHookFunction(((void *)((const uint8_t *)MGCopyAnswerFn + branch_offset)), (void *)new_MGCopyAnswer_internal, (void **)&orig_MGCopyAnswer_internal);
-		}
-		
-		CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)appsChosenUpdated, CFSTR("com.tonyk7.mgspoof/appsChosenUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-		CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)modifiedKeyUpdated, CFSTR("com.tonyk7.mgspoof/modifiedKeyUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-		modifiedKeyUpdated();
-	}
+// Taken from https://mayuyu.io/2017/06/26/HookingMGCopyAnswerLikeABoss/
+%ctor {
+    @autoreleasepool {
+        appsChosenUpdated();
+        // don't do anything if we in an app we don't want to spoof anything
+        if (![appsChosen containsObject:[NSBundle mainBundle].bundleIdentifier])
+            return;
+        
+        // basically dlopen libMobileGestalt
+        MSImageRef libGestalt = MSGetImageByName("/usr/lib/libMobileGestalt.dylib");
+        
+        if (libGestalt) {
+            
+            // Get "_MGCopyAnswer" symbol
+            void *MGCopyAnswerFn = MSFindSymbol(libGestalt, "_MGCopyAnswer");
+            
+            csh handle;
+            cs_insn *insn;
+            cs_insn BLInstruction;
+            size_t count;
+            unsigned long realMGAddress=0;
+            //MSHookFunction(Symbol,(void*)new_MGCA, (void**)&old_MGCA);
+            if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &handle) == CS_ERR_OK) {
+                /*cs_disasm(csh handle,
+                 const uint8_t *code, size_t code_size,
+                 uint64_t address,
+                 size_t count,
+                 cs_insn **insn);*/
+                count=cs_disasm(handle, (const uint8_t *)MGCopyAnswerFn ,0x1000, (uint64_t)MGCopyAnswerFn, 0, &insn);
+                if (count > 0) {
+                    // HBLogDebug(@"Found %lu instructions",count);
+                    for (size_t j = 0; j < count; j++) {
+                        // HBLogDebug(@"0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,insn[j].op_str);
+                        if (insn[j].id == ARM64_INS_B){
+                            BLInstruction = insn[j];
+                            sscanf(BLInstruction.op_str, "#%lx", &realMGAddress);
+                            HBLogDebug(@"realMGAddress: 0x%lx", realMGAddress);
+                            break;
+                        }
+                    }
+                    cs_free(insn, count);
+                } else{
+                    HBLogDebug(@"ERROR: Failed to disassemble given code!%i \n",cs_errno(handle));
+                }
+                
+                
+                cs_close(&handle);
+                
+                //Now perform actual hook
+                MSHookFunction((void*)realMGAddress,(void*)new_MGCopyAnswer, (void**)&orig_MGCopyAnswer);
+            } else {
+                HBLogDebug(@"MGHooker: CSE Failed");
+            }
+        }
+        
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)appsChosenUpdated, CFSTR("com.tonyk7.mgspoof/appsChosenUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)modifiedKeyUpdated, CFSTR("com.tonyk7.mgspoof/modifiedKeyUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        modifiedKeyUpdated();
+        initkeyTable();
+    }
 }
