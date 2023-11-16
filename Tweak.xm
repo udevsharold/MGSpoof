@@ -86,22 +86,12 @@ int sysctl(int *, u_int , void *, size_t *, void *, size_t);
     return ret;
 }
 
-static void appsChosenUpdated(NSString *bundleID) {
-    if ([bundleID isEqualToString:@"com.apple.springboard"]){
-        NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:@"com.tonyk7.MGSpoofHelperPrefsSuite"];
-        appsChosen = [prefs objectForKey:@"spoofApps"];
-    }else{
-        appsChosen = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"spoofApps"];
-    }
+static void appsChosenUpdated() {
+    appsChosen = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"spoofApps"];
 }
 
-static void modifiedKeyUpdated(NSString *bundleID) {
-    if ([bundleID isEqualToString:@"com.apple.springboard"]){
-        NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:@"com.tonyk7.MGSpoofHelperPrefsSuite"];
-	    modifiedKeys = [prefs objectForKey:@"modifiedKeys"];
-    }else{
-        modifiedKeys = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"modifiedKeys"];
-    }
+static void modifiedKeyUpdated() {
+    modifiedKeys = [[[HBPreferences alloc] initWithIdentifier:@"com.tonyk7.MGSpoofHelperPrefsSuite"] objectForKey:@"modifiedKeys"];
 }
 
 static void initkeyTable() {
@@ -111,10 +101,9 @@ static void initkeyTable() {
 // Taken from https://mayuyu.io/2017/06/26/HookingMGCopyAnswerLikeABoss/
 %ctor {
     @autoreleasepool {
-        NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-        appsChosenUpdated(bundleID);
+        appsChosenUpdated();
         // don't do anything if we in an app we don't want to spoof anything
-        if (![appsChosen containsObject:bundleID])
+        if (![appsChosen containsObject:[NSBundle mainBundle].bundleIdentifier])
             return;
         
         // basically dlopen libMobileGestalt
@@ -166,7 +155,7 @@ static void initkeyTable() {
         
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)appsChosenUpdated, CFSTR("com.tonyk7.mgspoof/appsChosenUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)modifiedKeyUpdated, CFSTR("com.tonyk7.mgspoof/modifiedKeyUpdated"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-        modifiedKeyUpdated(bundleID);
+        modifiedKeyUpdated();
         initkeyTable();
     }
 }
