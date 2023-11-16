@@ -1,6 +1,6 @@
 export ARCHS = arm64
 
-export DEBUG = 1
+export DEBUG = 0
 export FINALPACKAGE = 0
 
 export PREFIX = $(THEOS)/toolchain/Xcode11.xctoolchain/usr/bin/
